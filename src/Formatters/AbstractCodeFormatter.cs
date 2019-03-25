@@ -43,7 +43,6 @@ namespace Microsoft.CodeAnalysis.Tools.Formatters
             CancellationToken cancellationToken)
         {
             var formattedSolution = solution;
-            var filesFormatted = 0;
 
             foreach (var (document, formatTask) in formattedDocuments)
             {
@@ -59,10 +58,6 @@ namespace Microsoft.CodeAnalysis.Tools.Formatters
                 }
 
                 formattedSolution = formattedSolution.WithDocumentText(document.Id, text);
-
-                logger.LogInformation(Resources.Formatted_code_file_0, Path.GetFileName(document.FilePath));
-
-                filesFormatted++;
             }
 
             return formattedSolution;
