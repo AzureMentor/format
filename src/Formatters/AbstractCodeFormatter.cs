@@ -12,31 +12,46 @@ namespace Microsoft.CodeAnalysis.Tools.Formatters
 {
     internal abstract class AbstractCodeFormatter : ICodeFormatter
     {
+        /// <summary>
+        /// Applies formatting and returns a formatted <see cref="Solution"/>
+        /// </summary>
         public async Task<Solution> FormatAsync(
-            ILogger logger, 
             Solution solution, 
-            ImmutableArray<(Document, OptionSet)> formatableDocuments,
+            ImmutableArray<(Document, OptionSet)> formattableDocuments,
+            ILogger logger, 
             CancellationToken cancellationToken)
         {
-            var formattedDocuments = FormatFiles(logger, formatableDocuments, cancellationToken);
-            return await ApplyFileChangesAsync(logger, solution, formattedDocuments);
+            var formattedDocuments = FormatFiles(formattableDocuments, logger, cancellationToken);
+            return await ApplyFileChangesAsync(solution, formattedDocuments, logger, cancellationToken).ConfigureAwait(false);
         }
 
+        /// <summary>
+        /// Applies formatting and returns the changed <see cref="SourceText"/> for each <see cref="Document"/>.
+        /// </summary>
         protected abstract ImmutableArray<(Document, Task<SourceText>)> FormatFiles(
+            ImmutableArray<(Document, OptionSet)> formattableDocuments, 
             ILogger logger, 
-            ImmutableArray<(Document, OptionSet)> formatableDocuments, 
             CancellationToken cancellationToken);
 
+        /// <summary>
+        /// Applies the changed <see cref="SourceText"/> for each formatted <see cref="Document"/>.
+        /// </summary>
         private static async Task<Solution> ApplyFileChangesAsync(
-            ILogger logger,
             Solution solution, 
-            ImmutableArray<(Document, Task<SourceText>)> formattedDocuments)
+            ImmutableArray<(Document, Task<SourceText>)> formattedDocuments,
+            ILogger logger,
+            CancellationToken cancellationToken)
         {
             var formattedSolution = solution;
             var filesFormatted = 0;
 
             foreach (var (document, formatTask) in formattedDocuments)
             {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    return formattedSolution;
+                }
+
                 var text = await formatTask.ConfigureAwait(false);
                 if (text is null)
                 {

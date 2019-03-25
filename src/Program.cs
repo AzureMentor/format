@@ -87,12 +87,12 @@ namespace Microsoft.CodeAnalysis.Tools
                 Build.Locator.MSBuildLocator.RegisterInstance(msBuildInstance);
 
                 var formatResult = await CodeFormatter.FormatWorkspaceAsync(
-                    logger,
                     workspacePath,
                     isSolution,
                     logAllWorkspaceWarnings: logLevel == LogLevel.Trace,
                     saveFormattedFiles: !dryRun,
                     filesToFormat: fileList,
+                    logger,
                     cancellationTokenSource.Token).ConfigureAwait(false);
 
                 return GetExitCode(formatResult, check);
@@ -125,7 +125,7 @@ namespace Microsoft.CodeAnalysis.Tools
             return formatResult.FilesFormatted == 0 ? 0 : 1;
         }
 
-        internal static LogLevel GetLogLevel(string verbosity)
+        private static LogLevel GetLogLevel(string verbosity)
         {
             switch (verbosity)
             {

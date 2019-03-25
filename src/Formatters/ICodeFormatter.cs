@@ -10,6 +10,6 @@ namespace Microsoft.CodeAnalysis.Tools.Formatters
 {
     internal interface ICodeFormatter
     {
-        Task<Solution> FormatAsync(ILogger logger, Solution solution, ImmutableArray<(Document, OptionSet)> formatableDocuments, CancellationToken cancellationToken);
+        Task<Solution> FormatAsync(Solution solution, ImmutableArray<(Document, OptionSet)> formattableDocuments, ILogger logger, CancellationToken cancellationToken);
     }
 }

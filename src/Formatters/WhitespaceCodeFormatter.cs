@@ -15,13 +15,13 @@ namespace Microsoft.CodeAnalysis.Tools.Formatters
     internal sealed class WhitespaceCodeFormatter : AbstractCodeFormatter
     {
         protected override ImmutableArray<(Document, Task<SourceText>)> FormatFiles(
+            ImmutableArray<(Document, OptionSet)> formattableDocuments, 
             ILogger logger, 
-            ImmutableArray<(Document, OptionSet)> formatableDocuments, 
             CancellationToken cancellationToken)
         {
-            var formattedDocuments = ImmutableArray.CreateBuilder<(Document, Task<SourceText>)>(formatableDocuments.Length);
+            var formattedDocuments = ImmutableArray.CreateBuilder<(Document, Task<SourceText>)>(formattableDocuments.Length);
 
-            foreach (var (document, options) in formatableDocuments)
+            foreach (var (document, options) in formattableDocuments)
             {
                 var formatTask = Task.Run(async () =>
                 {
