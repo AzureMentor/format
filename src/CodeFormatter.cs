@@ -5,13 +5,13 @@ using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.CodeAnalysis.CodeStyle;
-using Microsoft.CodeAnalysis.Formatting;
 using Microsoft.CodeAnalysis.MSBuild;
 using Microsoft.CodeAnalysis.Options;
-using Microsoft.CodeAnalysis.Text;
+using Microsoft.CodeAnalysis.Tools.Formatters;
 using Microsoft.Extensions.Logging;
 using Microsoft.VisualStudio.CodingConventions;
 using Roslyn.Utilities;
@@ -21,19 +21,95 @@ namespace Microsoft.CodeAnalysis.Tools
     internal static class CodeFormatter
     {
         private const int MaxLoggedWorkspaceWarnings = 5;
+        private static readonly ImmutableArray<ICodeFormatter> s_codeFormatters = new ICodeFormatter[]
+        {
+            new WhitespaceCodeFormatter()
+        }.ToImmutableArray();
 
-        public static async Task<WorkspaceFormatResult> FormatWorkspaceAsync(ILogger logger, string solutionOrProjectPath, bool isSolution, bool logAllWorkspaceWarnings, bool saveFormattedFiles, ImmutableHashSet<string> filesToFormat, CancellationToken cancellationToken)
+        public static async Task<WorkspaceFormatResult> FormatWorkspaceAsync(
+            ILogger logger, 
+            string solutionOrProjectPath, 
+            bool isSolution,
+            bool logAllWorkspaceWarnings,
+            bool saveFormattedFiles,
+            ImmutableHashSet<string> filesToFormat,
+            CancellationToken cancellationToken)
         {
             logger.LogInformation(string.Format(Resources.Formatting_code_files_in_workspace_0, solutionOrProjectPath));
 
             logger.LogTrace(Resources.Loading_workspace);
 
-            var loggedWarningCount = 0;
+            var workspaceStopwatch = Stopwatch.StartNew();
             var formatResult = new WorkspaceFormatResult()
             {
                 ExitCode = 1
             };
-            var workspaceStopwatch = Stopwatch.StartNew();
+
+            using (var workspace = await OpenWorkspaceAsync(
+                logger, solutionOrProjectPath, isSolution, logAllWorkspaceWarnings, cancellationToken).ConfigureAwait(false))
+            {
+                if (workspace is null)
+                {
+                    return formatResult;
+                }
+
+                logger.LogDebug(Resources.Workspace_loaded_in_0_ms, workspaceStopwatch.ElapsedMilliseconds);
+                workspaceStopwatch.Restart();
+
+                var projectPath = isSolution ? string.Empty : solutionOrProjectPath;
+                var solution = workspace.CurrentSolution;
+
+                logger.LogDebug("Determining formatable files...");
+
+                var (fileCount, formatableFiles) = await DetermineFormatableFiles(
+                    logger, solution, projectPath, filesToFormat, cancellationToken).ConfigureAwait(false);
+
+                var determineFilesMS = workspaceStopwatch.ElapsedMilliseconds;
+                logger.LogDebug("Determining formatable files took {0}ms", determineFilesMS);
+
+                logger.LogDebug("Running formatters...");
+
+                var formattedSolution = await RunCodeFormattersAsync(
+                    logger, solution, formatableFiles, cancellationToken).ConfigureAwait(false);
+
+                var formatterRanMS = workspaceStopwatch.ElapsedMilliseconds - determineFilesMS;
+                logger.LogDebug("Running formatters took {0}ms", formatterRanMS);
+
+                logger.LogDebug("Saving changes...");
+
+                var solutionChanges = formattedSolution.GetChanges(solution);
+                formatResult.FilesFormatted = solutionChanges.GetProjectChanges().Sum(
+                    projectChanges => projectChanges.GetChangedDocuments().Count());
+                formatResult.FileCount = fileCount;
+
+                if (saveFormattedFiles && !workspace.TryApplyChanges(formattedSolution))
+                {
+                    logger.LogError(Resources.Failed_to_save_formatting_changes);
+                }
+                else
+                {
+                    formatResult.ExitCode = 0;
+                }
+
+                var savingChangesMS = workspaceStopwatch.ElapsedMilliseconds - determineFilesMS - formatterRanMS;
+                logger.LogDebug("Saving changes took {0}ms", savingChangesMS);
+
+                logger.LogDebug(Resources.Formatted_0_of_1_files_in_2_ms, formatResult.FilesFormatted, formatResult.FileCount, workspaceStopwatch.ElapsedMilliseconds);
+            }
+
+            logger.LogInformation(Resources.Format_complete);
+
+            return formatResult;
+        }
+
+        private static async Task<Workspace> OpenWorkspaceAsync(
+            ILogger logger, 
+            string solutionOrProjectPath, 
+            bool isSolution, 
+            bool logAllWorkspaceWarnings, 
+            CancellationToken cancellationToken)
+        {
+            var loggedWarningCount = 0;
 
             var properties = new Dictionary<string, string>(StringComparer.Ordinal)
             {
@@ -46,42 +122,32 @@ namespace Microsoft.CodeAnalysis.Tools
                 { "ExcludeRestorePackageImports", bool.TrueString },
             };
 
-            var codingConventionsManager = CodingConventionsManagerFactory.CreateCodingConventionsManager();
+            var workspace = MSBuildWorkspace.Create(properties);
+            workspace.WorkspaceFailed += LogWorkspaceWarnings;
 
-            using (var workspace = MSBuildWorkspace.Create(properties))
+            var projectPath = string.Empty;
+            if (isSolution)
             {
-                workspace.WorkspaceFailed += LogWorkspaceWarnings;
-
-                var projectPath = string.Empty;
-                if (isSolution)
+                await workspace.OpenSolutionAsync(solutionOrProjectPath, cancellationToken: cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                try
                 {
-                    await workspace.OpenSolutionAsync(solutionOrProjectPath, cancellationToken: cancellationToken).ConfigureAwait(false);
+                    await workspace.OpenProjectAsync(solutionOrProjectPath, cancellationToken: cancellationToken).ConfigureAwait(false);
+                    projectPath = solutionOrProjectPath;
                 }
-                else
+                catch (InvalidOperationException)
                 {
-                    try
-                    {
-                        await workspace.OpenProjectAsync(solutionOrProjectPath, cancellationToken: cancellationToken).ConfigureAwait(false);
-                        projectPath = solutionOrProjectPath;
-                    }
-                    catch (InvalidOperationException)
-                    {
-                        logger.LogError(Resources.Could_not_format_0_Format_currently_supports_only_CSharp_and_Visual_Basic_projects, solutionOrProjectPath);
-                        return formatResult;
-                    }
+                    logger.LogError(Resources.Could_not_format_0_Format_currently_supports_only_CSharp_and_Visual_Basic_projects, solutionOrProjectPath);
+                    workspace.Dispose();
+                    return null;
                 }
-
-                logger.LogTrace(Resources.Workspace_loaded_in_0_ms, workspaceStopwatch.ElapsedMilliseconds);
-                workspaceStopwatch.Restart();
-
-                (formatResult.ExitCode, formatResult.FileCount, formatResult.FilesFormatted) = await FormatFilesInWorkspaceAsync(logger, workspace, projectPath, codingConventionsManager, saveFormattedFiles, filesToFormat, cancellationToken).ConfigureAwait(false);
-
-                logger.LogDebug(Resources.Formatted_0_of_1_files_in_2_ms, formatResult.FilesFormatted, formatResult.FileCount, workspaceStopwatch.ElapsedMilliseconds);
             }
 
-            logger.LogInformation(Resources.Format_complete);
+            workspace.WorkspaceFailed -= LogWorkspaceWarnings;
 
-            return formatResult;
+            return workspace;
 
             void LogWorkspaceWarnings(object sender, WorkspaceDiagnosticEventArgs args)
             {
@@ -105,16 +171,38 @@ namespace Microsoft.CodeAnalysis.Tools
             }
         }
 
-        private static async Task<(int status, int fileCount, int filesFormatted)> FormatFilesInWorkspaceAsync(ILogger logger, Workspace workspace, string projectPath, ICodingConventionsManager codingConventionsManager, bool saveFormattedFiles, ImmutableHashSet<string> filesToFormat, CancellationToken cancellationToken)
+        private static async Task<Solution> RunCodeFormattersAsync(
+            ILogger logger, 
+            Solution solution, 
+            ImmutableArray<(Document, OptionSet)> formatableDocuments, 
+            CancellationToken cancellationToken)
         {
-            var projectIds = workspace.CurrentSolution.ProjectIds.ToImmutableArray();
+            var formattedSolution = solution;
+
+            foreach (var codeFormatter in s_codeFormatters)
+            {
+                formattedSolution = await codeFormatter.FormatAsync(logger, formattedSolution, formatableDocuments, cancellationToken);
+            }
+
+            return formattedSolution;
+        }
+
+        internal static async Task<(int, ImmutableArray<(Document, OptionSet)>)> DetermineFormatableFiles(
+            ILogger logger, 
+            Solution solution, 
+            string projectPath, 
+            ImmutableHashSet<string> filesToFormat, 
+            CancellationToken cancellationToken)
+        {
+            var codingConventionsManager = CodingConventionsManagerFactory.CreateCodingConventionsManager();
             var optionsApplier = new EditorConfigOptionsApplier();
 
-            var totalFileCount = 0;
-            var totalFilesFormatted = 0;
-            foreach (var projectId in projectIds)
+            var getDocumentsAndOptions = new List<Task<(Document, OptionSet, bool)>>(solution.Projects.Sum(project => project.DocumentIds.Count));
+
+            var fileCount = 0;
+
+            foreach (var project in solution.Projects)
             {
-                var project = workspace.CurrentSolution.GetProject(projectId);
                 if (!string.IsNullOrEmpty(projectPath) && !project.FilePath.Equals(projectPath, StringComparison.OrdinalIgnoreCase))
                 {
                     logger.LogDebug(Resources.Skipping_referenced_project_0, project.Name);
@@ -127,100 +215,78 @@ namespace Microsoft.CodeAnalysis.Tools
                     continue;
                 }
 
-                logger.LogInformation(Resources.Formatting_code_files_in_project_0, project.Name);
-
-                var (formattedSolution, filesFormatted) = await FormatFilesInProjectAsync(logger, project, codingConventionsManager, optionsApplier, filesToFormat, cancellationToken).ConfigureAwait(false);
-                totalFileCount += project.DocumentIds.Count;
-                totalFilesFormatted += filesFormatted;
-                if (saveFormattedFiles && !workspace.TryApplyChanges(formattedSolution))
-                {
-                    logger.LogError(Resources.Failed_to_save_formatting_changes);
-                    return (1, totalFileCount, totalFilesFormatted);
-                }
+                fileCount += project.DocumentIds.Count;
+                getDocumentsAndOptions.AddRange(project.DocumentIds.Select(
+                    documentId => GetDocumentAndOptions(project, documentId, filesToFormat, codingConventionsManager, optionsApplier, cancellationToken)));
             }
 
-            return (0, totalFileCount, totalFilesFormatted);
+            var documentsAndOptions = await Task.WhenAll(getDocumentsAndOptions).ConfigureAwait(false);
+            var foundEditorConfig = documentsAndOptions.Any(documentAndOptions => documentAndOptions.Item3);
+
+            var addedFilePaths = new HashSet<string>(documentsAndOptions.Length);
+            var formatableFiles = ImmutableArray.CreateBuilder<(Document, OptionSet)>(documentsAndOptions.Length);
+            foreach (var (document, options, hasEditorConfig) in documentsAndOptions)
+            {
+                if (document is null)
+                {
+                    continue;
+                }
+
+                if (foundEditorConfig && !hasEditorConfig)
+                {
+                    continue;
+                }
+
+                if (addedFilePaths.Contains(document.FilePath))
+                {
+                    continue;
+                }
+
+                addedFilePaths.Add(document.FilePath);
+
+                formatableFiles.Add((document, options));
+            }
+
+            return (fileCount, formatableFiles.ToImmutableArray());
         }
 
-        private static async Task<(Solution solution, int filesFormatted)> FormatFilesInProjectAsync(ILogger logger, Project project, ICodingConventionsManager codingConventionsManager, EditorConfigOptionsApplier optionsApplier, ImmutableHashSet<string> filesToFormat, CancellationToken cancellationToken)
+        private static async Task<(Document, OptionSet, bool)> GetDocumentAndOptions(
+            Project project, 
+            DocumentId documentId, 
+            ImmutableHashSet<string> filesToFormat, 
+            ICodingConventionsManager codingConventionsManager, 
+            EditorConfigOptionsApplier optionsApplier, 
+            CancellationToken cancellationToken)
         {
-            var isCommentTrivia = project.Language == LanguageNames.CSharp
-                ? IsCSharpCommentTrivia
-                : IsVisualBasicCommentTrivia;
+            var document = project.Solution.GetDocument(documentId);
 
-            var formattedDocuments = new List<(DocumentId documentId, Task<SourceText> formatTask)>();
-            foreach (var documentId in project.DocumentIds)
+            if (!filesToFormat.IsEmpty && !filesToFormat.Contains(document.FilePath))
             {
-                var document = project.Solution.GetDocument(documentId);
-                if (!document.SupportsSyntaxTree)
-                {
-                    continue;
-                }
-
-                if (!filesToFormat.IsEmpty && !filesToFormat.Contains(document.FilePath))
-                {
-                    continue;
-                }
-
-                var formatTask = Task.Run(async () =>
-                {
-                    var syntaxTree = await document.GetSyntaxTreeAsync(cancellationToken).ConfigureAwait(false);
-                    if (GeneratedCodeUtilities.IsGeneratedCode(syntaxTree, isCommentTrivia, cancellationToken))
-                    {
-                        return null;
-                    }
-
-                    logger.LogTrace(Resources.Formatting_code_file_0, Path.GetFileName(document.FilePath));
-
-                    OptionSet documentOptions = await document.GetOptionsAsync(cancellationToken).ConfigureAwait(false);
-
-                    var codingConventionsContext = await codingConventionsManager.GetConventionContextAsync(document.FilePath, cancellationToken).ConfigureAwait(false);
-                    if (codingConventionsContext?.CurrentConventions != null)
-                    {
-                        documentOptions = optionsApplier.ApplyConventions(documentOptions, codingConventionsContext.CurrentConventions, project.Language);
-                    }
-
-                    var formattedDocument = await Formatter.FormatAsync(document, documentOptions, cancellationToken).ConfigureAwait(false);
-                    var formattedSourceText = await formattedDocument.GetTextAsync(cancellationToken).ConfigureAwait(false);
-                    if (formattedSourceText.ContentEquals(await document.GetTextAsync(cancellationToken).ConfigureAwait(false)))
-                    {
-                        // Avoid touching files that didn't actually change
-                        return null;
-                    }
-
-                    logger.LogInformation(Resources.Formatted_code_file_0, Path.GetFileName(document.FilePath));
-
-                    return formattedSourceText;
-                }, cancellationToken);
-
-                formattedDocuments.Add((documentId, formatTask));
+                return (null, null, false);
             }
 
-            var formattedSolution = project.Solution;
-            var filesFormatted = 0;
-            foreach (var (documentId, formatTask) in formattedDocuments)
+            if (!document.SupportsSyntaxTree)
             {
-                var text = await formatTask.ConfigureAwait(false);
-                if (text is null)
-                {
-                    continue;
-                }
-
-                filesFormatted++;
-                formattedSolution = formattedSolution.WithDocumentText(documentId, text);
+                return (null, null, false);
             }
 
-            return (formattedSolution, filesFormatted);
+            if (await GeneratedCodeUtilities.IsGeneratedCodeAsync(document, cancellationToken).ConfigureAwait(false))
+            {
+                return (null, null, false);
+            }
+
+            var context = await codingConventionsManager.GetConventionContextAsync(
+                document.FilePath, cancellationToken).ConfigureAwait(false);
+
+            OptionSet options = await document.GetOptionsAsync(cancellationToken).ConfigureAwait(false);
+
+            if (context?.CurrentConventions is null)
+            {
+                return (document, options, false);
+            }
+
+            options = optionsApplier.ApplyConventions(options, context.CurrentConventions, project.Language);
+            return (document, options, true);
         }
-
-        private static readonly Func<SyntaxTrivia, bool> IsCSharpCommentTrivia =
-            (syntaxTrivia) => syntaxTrivia.IsKind(CSharp.SyntaxKind.SingleLineCommentTrivia)
-                || syntaxTrivia.IsKind(CSharp.SyntaxKind.MultiLineCommentTrivia)
-                || syntaxTrivia.IsKind(CSharp.SyntaxKind.SingleLineDocumentationCommentTrivia)
-                || syntaxTrivia.IsKind(CSharp.SyntaxKind.MultiLineDocumentationCommentTrivia);
-
-        private static readonly Func<SyntaxTrivia, bool> IsVisualBasicCommentTrivia =
-            (syntaxTrivia) => syntaxTrivia.IsKind(VisualBasic.SyntaxKind.CommentTrivia)
-                || syntaxTrivia.IsKind(VisualBasic.SyntaxKind.DocumentationCommentTrivia);
     }
 }

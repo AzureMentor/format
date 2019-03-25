@@ -2,7 +2,7 @@
   "profiles": {
     "dotnet-format (--dry-run)": {
       "commandName": "Project",
-      "commandLineArgs": "-w format.sln -v detailed --dry-run",
+      "commandLineArgs": "-w ..\\roslyn\\roslyn.sln -v detailed --dry-run",
       "workingDirectory": "$(SolutionDir)"
     },
     "dotnet-format": {

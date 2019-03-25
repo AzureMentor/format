@@ -1,7 +1,6 @@
 ﻿// Copyright (c) Microsoft.  All Rights Reserved.  Licensed under the MIT license.  See License.txt in the project root for license information.
 
 using System;
-using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Linq;
 using System.Reflection;
@@ -62,7 +61,10 @@ namespace Microsoft.CodeAnalysis.CodeStyle
             return storageLocation.GetType().FullName.StartsWith("Microsoft.CodeAnalysis.Options.EditorConfigStorageLocation");
         }
 
-        internal static bool TryGetConventionValue((IOption, OptionStorageLocation, MethodInfo) optionWithStorage, ICodingConventionsSnapshot codingConventions, out object value)
+        internal static bool TryGetConventionValue(
+            (IOption, OptionStorageLocation, MethodInfo) optionWithStorage, 
+            ICodingConventionsSnapshot codingConventions, 
+            out object value)
         {
             var (option, editorConfigStorage, tryGetOptionMethod) = optionWithStorage;
 
