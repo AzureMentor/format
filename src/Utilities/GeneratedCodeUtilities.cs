@@ -17,11 +17,11 @@ namespace Roslyn.Utilities
         internal static async Task<bool> IsGeneratedCodeAsync(Document document, CancellationToken cancellationToken)
         {
             var isCommentTrivia = document.Project.Language == LanguageNames.CSharp
-                ? IsCSharpCommentTrivia
-                : IsVisualBasicCommentTrivia;
+                ? s_isCSharpCommentTrivia
+                : s_isVisualBasicCommentTrivia;
 
             var syntaxTree = await document.GetSyntaxTreeAsync(cancellationToken).ConfigureAwait(false);
-            return GeneratedCodeUtilities.IsGeneratedCode(syntaxTree, isCommentTrivia, cancellationToken);
+            return IsGeneratedCode(syntaxTree, isCommentTrivia, cancellationToken);
         }
 
         internal static bool IsGeneratedCode(
@@ -89,13 +89,13 @@ namespace Roslyn.Utilities
             return false;
         }
 
-        private static readonly Func<SyntaxTrivia, bool> IsCSharpCommentTrivia =
+        private static readonly Func<SyntaxTrivia, bool> s_isCSharpCommentTrivia =
             (syntaxTrivia) => syntaxTrivia.IsKind(CSharp.SyntaxKind.SingleLineCommentTrivia)
                 || syntaxTrivia.IsKind(CSharp.SyntaxKind.MultiLineCommentTrivia)
                 || syntaxTrivia.IsKind(CSharp.SyntaxKind.SingleLineDocumentationCommentTrivia)
                 || syntaxTrivia.IsKind(CSharp.SyntaxKind.MultiLineDocumentationCommentTrivia);
 
-        private static readonly Func<SyntaxTrivia, bool> IsVisualBasicCommentTrivia =
+        private static readonly Func<SyntaxTrivia, bool> s_isVisualBasicCommentTrivia =
             (syntaxTrivia) => syntaxTrivia.IsKind(VisualBasic.SyntaxKind.CommentTrivia)
                 || syntaxTrivia.IsKind(VisualBasic.SyntaxKind.DocumentationCommentTrivia);
     }

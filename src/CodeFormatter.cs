@@ -23,16 +23,16 @@ namespace Microsoft.CodeAnalysis.Tools
         private const int MaxLoggedWorkspaceWarnings = 5;
         private static readonly ImmutableArray<ICodeFormatter> s_codeFormatters = new ICodeFormatter[]
         {
-            new WhitespaceCodeFormatter()
+            new WhitespaceFormatter()
         }.ToImmutableArray();
 
         public static async Task<WorkspaceFormatResult> FormatWorkspaceAsync(
-            string solutionOrProjectPath, 
+            string solutionOrProjectPath,
             bool isSolution,
             bool logAllWorkspaceWarnings,
             bool saveFormattedFiles,
             ImmutableHashSet<string> filesToFormat,
-            ILogger logger, 
+            ILogger logger,
             CancellationToken cancellationToken)
         {
             logger.LogInformation(string.Format(Resources.Formatting_code_files_in_workspace_0, solutionOrProjectPath));
@@ -53,8 +53,8 @@ namespace Microsoft.CodeAnalysis.Tools
                     return formatResult;
                 }
 
+                var loadWorkspaceMS = workspaceStopwatch.ElapsedMilliseconds;
                 logger.LogDebug(Resources.Workspace_loaded_in_0_ms, workspaceStopwatch.ElapsedMilliseconds);
-                workspaceStopwatch.Restart();
 
                 var projectPath = isSolution ? string.Empty : solutionOrProjectPath;
                 var solution = workspace.CurrentSolution;
@@ -64,7 +64,7 @@ namespace Microsoft.CodeAnalysis.Tools
                 var (fileCount, formattableFiles) = await DetermineFormattableFiles(
                     solution, projectPath, filesToFormat, logger, cancellationToken).ConfigureAwait(false);
 
-                var determineFilesMS = workspaceStopwatch.ElapsedMilliseconds;
+                var determineFilesMS = workspaceStopwatch.ElapsedMilliseconds - loadWorkspaceMS;
                 logger.LogDebug("Determining formattable files took {0}ms", determineFilesMS);
 
                 logger.LogDebug("Running formatters...");
@@ -72,7 +72,7 @@ namespace Microsoft.CodeAnalysis.Tools
                 var formattedSolution = await RunCodeFormattersAsync(
                     solution, formattableFiles, logger, cancellationToken).ConfigureAwait(false);
 
-                var formatterRanMS = workspaceStopwatch.ElapsedMilliseconds - determineFilesMS;
+                var formatterRanMS = workspaceStopwatch.ElapsedMilliseconds - loadWorkspaceMS - determineFilesMS;
                 logger.LogDebug("Running formatters took {0}ms", formatterRanMS);
 
                 logger.LogDebug("Saving changes...");
@@ -102,7 +102,7 @@ namespace Microsoft.CodeAnalysis.Tools
                     formatResult.ExitCode = 0;
                 }
 
-                var savingChangesMS = workspaceStopwatch.ElapsedMilliseconds - determineFilesMS - formatterRanMS;
+                var savingChangesMS = workspaceStopwatch.ElapsedMilliseconds - loadWorkspaceMS - determineFilesMS - formatterRanMS;
                 logger.LogDebug("Saving changes took {0}ms", savingChangesMS);
 
                 logger.LogDebug(Resources.Formatted_0_of_1_files_in_2_ms, formatResult.FilesFormatted, formatResult.FileCount, workspaceStopwatch.ElapsedMilliseconds);
@@ -114,10 +114,10 @@ namespace Microsoft.CodeAnalysis.Tools
         }
 
         private static async Task<Workspace> OpenWorkspaceAsync(
-            string solutionOrProjectPath, 
-            bool isSolution, 
-            bool logAllWorkspaceWarnings, 
-            ILogger logger, 
+            string solutionOrProjectPath,
+            bool isSolution,
+            bool logAllWorkspaceWarnings,
+            ILogger logger,
             CancellationToken cancellationToken)
         {
             var loggedWarningCount = 0;
@@ -183,26 +183,26 @@ namespace Microsoft.CodeAnalysis.Tools
         }
 
         private static async Task<Solution> RunCodeFormattersAsync(
-            Solution solution, 
-            ImmutableArray<(Document, OptionSet)> formattableDocuments, 
-            ILogger logger, 
+            Solution solution,
+            ImmutableArray<(Document, OptionSet)> formattableDocuments,
+            ILogger logger,
             CancellationToken cancellationToken)
         {
             var formattedSolution = solution;
 
             foreach (var codeFormatter in s_codeFormatters)
             {
-                formattedSolution = await codeFormatter.FormatAsync(formattedSolution, formattableDocuments, logger, cancellationToken);
+                formattedSolution = await codeFormatter.FormatAsync(formattedSolution, formattableDocuments, logger, cancellationToken).ConfigureAwait(false);
             }
 
             return formattedSolution;
         }
 
         internal static async Task<(int, ImmutableArray<(Document, OptionSet)>)> DetermineFormattableFiles(
-            Solution solution, 
-            string projectPath, 
-            ImmutableHashSet<string> filesToFormat, 
-            ILogger logger, 
+            Solution solution,
+            string projectPath,
+            ImmutableHashSet<string> filesToFormat,
+            ILogger logger,
             CancellationToken cancellationToken)
         {
             var codingConventionsManager = CodingConventionsManagerFactory.CreateCodingConventionsManager();
@@ -227,8 +227,10 @@ namespace Microsoft.CodeAnalysis.Tools
                 }
 
                 fileCount += project.DocumentIds.Count;
-                getDocumentsAndOptions.AddRange(project.DocumentIds.Select(
-                    documentId => GetDocumentAndOptions(project, documentId, filesToFormat, codingConventionsManager, optionsApplier, cancellationToken)));
+
+                var getProjectDocuments = project.DocumentIds.Select(documentId => Task.Run(async () => await GetDocumentAndOptions(
+                    project, documentId, filesToFormat, codingConventionsManager, optionsApplier, cancellationToken).ConfigureAwait(false), cancellationToken));
+                getDocumentsAndOptions.AddRange(getProjectDocuments);
             }
 
             var documentsAndOptions = await Task.WhenAll(getDocumentsAndOptions).ConfigureAwait(false);
@@ -262,11 +264,11 @@ namespace Microsoft.CodeAnalysis.Tools
         }
 
         private static async Task<(Document, OptionSet, bool)> GetDocumentAndOptions(
-            Project project, 
-            DocumentId documentId, 
-            ImmutableHashSet<string> filesToFormat, 
-            ICodingConventionsManager codingConventionsManager, 
-            EditorConfigOptionsApplier optionsApplier, 
+            Project project,
+            DocumentId documentId,
+            ImmutableHashSet<string> filesToFormat,
+            ICodingConventionsManager codingConventionsManager,
+            EditorConfigOptionsApplier optionsApplier,
             CancellationToken cancellationToken)
         {
             var document = project.Solution.GetDocument(documentId);

@@ -1,7 +1,6 @@
 ﻿// Copyright (c) Microsoft.  All Rights Reserved.  Licensed under the MIT license.  See License.txt in the project root for license information.
 
 using System.Collections.Immutable;
-using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.CodeAnalysis.Options;
@@ -10,36 +9,59 @@ using Microsoft.Extensions.Logging;
 
 namespace Microsoft.CodeAnalysis.Tools.Formatters
 {
-    internal abstract class AbstractCodeFormatter : ICodeFormatter
+    /// <summary>
+    /// Base class for code formatters that work against a single document at a time.
+    /// </summary>
+    internal abstract class DocumentFormatter : ICodeFormatter
     {
         /// <summary>
         /// Applies formatting and returns a formatted <see cref="Solution"/>
         /// </summary>
         public async Task<Solution> FormatAsync(
-            Solution solution, 
+            Solution solution,
             ImmutableArray<(Document, OptionSet)> formattableDocuments,
-            ILogger logger, 
+            ILogger logger,
             CancellationToken cancellationToken)
         {
             var formattedDocuments = FormatFiles(formattableDocuments, logger, cancellationToken);
-            return await ApplyFileChangesAsync(solution, formattedDocuments, logger, cancellationToken).ConfigureAwait(false);
+            return await ApplyFileChangesAsync(solution, formattedDocuments, cancellationToken).ConfigureAwait(false);
         }
+
+        /// <summary>
+        /// Applies formatting and returns the changed <see cref="SourceText"/> for a <see cref="Document"/>.
+        /// </summary>
+        protected abstract Task<SourceText> FormatFileAsync(
+            Document document,
+            OptionSet options,
+            ILogger logger,
+            CancellationToken cancellationToken);
 
         /// <summary>
         /// Applies formatting and returns the changed <see cref="SourceText"/> for each <see cref="Document"/>.
         /// </summary>
-        protected abstract ImmutableArray<(Document, Task<SourceText>)> FormatFiles(
-            ImmutableArray<(Document, OptionSet)> formattableDocuments, 
-            ILogger logger, 
-            CancellationToken cancellationToken);
+        private ImmutableArray<(Document, Task<SourceText>)> FormatFiles(
+            ImmutableArray<(Document, OptionSet)> formattableDocuments,
+            ILogger logger,
+            CancellationToken cancellationToken)
+        {
+            var formattedDocuments = ImmutableArray.CreateBuilder<(Document, Task<SourceText>)>(formattableDocuments.Length);
+
+            foreach (var (document, options) in formattableDocuments)
+            {
+                var formatTask = Task.Run(async () => await FormatFileAsync(document, options, logger, cancellationToken).ConfigureAwait(false), cancellationToken);
+
+                formattedDocuments.Add((document, formatTask));
+            }
+
+            return formattedDocuments.ToImmutableArray();
+        }
 
         /// <summary>
         /// Applies the changed <see cref="SourceText"/> for each formatted <see cref="Document"/>.
         /// </summary>
         private static async Task<Solution> ApplyFileChangesAsync(
-            Solution solution, 
+            Solution solution,
             ImmutableArray<(Document, Task<SourceText>)> formattedDocuments,
-            ILogger logger,
             CancellationToken cancellationToken)
         {
             var formattedSolution = solution;

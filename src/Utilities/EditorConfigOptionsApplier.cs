@@ -62,8 +62,8 @@ namespace Microsoft.CodeAnalysis.CodeStyle
         }
 
         internal static bool TryGetConventionValue(
-            (IOption, OptionStorageLocation, MethodInfo) optionWithStorage, 
-            ICodingConventionsSnapshot codingConventions, 
+            (IOption, OptionStorageLocation, MethodInfo) optionWithStorage,
+            ICodingConventionsSnapshot codingConventions,
             out object value)
         {
             var (option, editorConfigStorage, tryGetOptionMethod) = optionWithStorage;
